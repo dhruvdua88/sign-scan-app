@@ -10,18 +10,19 @@ const TARGET_DPI = 200
 const PT_PER_INCH = 72
 
 export default function App() {
-  const [pages, setPages] = useState([])      // [{canvas, ptW, ptH, displayW, displayH}]
+  const [pages, setPages] = useState([])      // [{canvas, ptW, ptH}]
   const [loading, setLoading] = useState(false)
   const [status, setStatus] = useState('')
-  const [signImg, setSignImg] = useState(null)
-  const [signBox, setSignBox] = useState(null) // {x, y, w, h} in document px (relative to pages stack)
+  const [stamps, setStamps] = useState([])    // [{id, img, x, y, w, h}] document px, relative to pages stack
+  const [selId, setSelId] = useState(null)
   const [intensity, setIntensity] = useState(35)
   const [skew, setSkew] = useState(true)
   const [exporting, setExporting] = useState(false)
 
   const stackRef = useRef(null)
   const pageRefs = useRef([])
-  const signRef = useRef(null)
+  const stampRefs = useRef({})   // id -> DOM el
+  const idRef = useRef(0)
   const dragState = useRef(null)
 
   // ---------- load PDF ----------
@@ -33,7 +34,6 @@ export default function App() {
     }
     setLoading(true)
     setStatus('Rendering PDF…')
-    setSignBox(null)
     try {
       const buf = await file.arrayBuffer()
       const pdf = await pdfjsLib.getDocument({ data: buf }).promise
@@ -74,72 +74,70 @@ export default function App() {
     })
   }, [pages])
 
-  // ---------- load signature PNG ----------
-  const loadSign = useCallback((file) => {
-    if (!file) return
-    const url = URL.createObjectURL(file)
-    const img = new Image()
-    img.onload = () => {
-      setSignImg(img)
-      setSignBox((prev) => {
-        // swapping an existing signature: keep position + width, refit height
-        if (prev) return { ...prev, h: prev.w * (img.height / img.width) }
-        // first signature: default place ~28% of first page width, near top-left
-        const stack = stackRef.current
+  // ---------- add one or more signature PNGs (each becomes its own stamp) ----------
+  const addSigns = useCallback((files) => {
+    const list = [...files].filter((f) => f.type.startsWith('image/'))
+    list.forEach((file) => {
+      const url = URL.createObjectURL(file)
+      const img = new Image()
+      img.onload = () => {
         const firstPage = pageRefs.current[0]
+        const stack = stackRef.current
         const baseW = firstPage ? firstPage.getBoundingClientRect().width : 300
         const w = baseW * 0.28
         const h = w * (img.height / img.width)
         const sRect = stack?.getBoundingClientRect()
         const pRect = firstPage?.getBoundingClientRect()
-        const x = pRect && sRect ? pRect.left - sRect.left + baseW * 0.1 : 20
-        return { x, y: 40, w, h }
-      })
-    }
-    img.src = url
+        const x0 = pRect && sRect ? pRect.left - sRect.left + baseW * 0.1 : 20
+        const id = ++idRef.current
+        setStamps((prev) => {
+          const k = prev.length
+          return [...prev, { id, img, x: x0 + k * 26, y: 40 + k * 26, w, h }]
+        })
+        setSelId(id)
+      }
+      img.src = url
+    })
   }, [])
 
-  const removeSign = useCallback(() => {
-    setSignImg(null)
-    setSignBox(null)
+  const delStamp = useCallback((id) => {
+    setStamps((prev) => prev.filter((s) => s.id !== id))
+    setSelId((cur) => (cur === id ? null : cur))
   }, [])
 
-  // ---------- drag / resize ----------
-  const onSignPointerDown = (e, mode) => {
+  // ---------- drag / resize a specific stamp ----------
+  const onDown = (e, id, mode) => {
     e.preventDefault()
     e.stopPropagation()
-    const stack = stackRef.current.getBoundingClientRect()
+    setSelId(id)
+    const s = stamps.find((x) => x.id === id)
+    if (!s) return
     dragState.current = {
-      mode,
-      startX: e.clientX,
-      startY: e.clientY,
-      box: { ...signBox },
-      aspect: signBox.w / signBox.h,
-      stackLeft: stack.left,
-      stackTop: stack.top,
+      id, mode,
+      startX: e.clientX, startY: e.clientY,
+      box: { ...s }, aspect: s.w / s.h,
     }
-    window.addEventListener('pointermove', onPointerMove)
-    window.addEventListener('pointerup', onPointerUp)
+    window.addEventListener('pointermove', onMove)
+    window.addEventListener('pointerup', onUp)
   }
 
-  const onPointerMove = (e) => {
+  const onMove = (e) => {
     const d = dragState.current
     if (!d) return
     const dx = e.clientX - d.startX
     const dy = e.clientY - d.startY
-    if (d.mode === 'move') {
-      setSignBox({ ...d.box, x: d.box.x + dx, y: d.box.y + dy })
-    } else {
-      let w = Math.max(24, d.box.w + dx)
-      let h = w / d.aspect
-      setSignBox({ ...d.box, w, h })
-    }
+    setStamps((prev) => prev.map((s) => {
+      if (s.id !== d.id) return s
+      if (d.mode === 'move') return { ...s, x: d.box.x + dx, y: d.box.y + dy }
+      const w = Math.max(24, d.box.w + dx)
+      return { ...s, w, h: w / d.aspect }
+    }))
   }
 
-  const onPointerUp = () => {
+  const onUp = () => {
     dragState.current = null
-    window.removeEventListener('pointermove', onPointerMove)
-    window.removeEventListener('pointerup', onPointerUp)
+    window.removeEventListener('pointermove', onMove)
+    window.removeEventListener('pointerup', onUp)
   }
 
   // ---------- scan effect on a finished page canvas ----------
@@ -154,9 +152,8 @@ export default function App() {
     ctx.fillStyle = '#ffffff'
     ctx.fillRect(0, 0, w, h)
 
-    // subtle skew like a sheet fed slightly crooked
     if (skew && k > 0) {
-      const ang = (Math.random() - 0.5) * 0.012 * (0.4 + k) // radians, tiny
+      const ang = (Math.random() - 0.5) * 0.012 * (0.4 + k)
       ctx.save()
       ctx.translate(w / 2, h / 2)
       ctx.rotate(ang)
@@ -167,7 +164,6 @@ export default function App() {
       ctx.drawImage(srcCanvas, 0, 0)
     }
 
-    // pixel pass: contrast + grain, color preserved
     const contrast = 1 + 0.22 * k
     const bright = 4 * k
     const noiseAmt = 14 * k
@@ -183,7 +179,6 @@ export default function App() {
     }
     ctx.putImageData(id, 0, 0)
 
-    // faint scanner edge shadow
     if (k > 0) {
       const g = ctx.createLinearGradient(0, 0, 0, h)
       g.addColorStop(0, `rgba(0,0,0,${0.05 * k})`)
@@ -202,8 +197,6 @@ export default function App() {
     setExporting(true)
     setStatus('Flattening & exporting…')
     try {
-      const stackRect = stackRef.current.getBoundingClientRect()
-      const signRect = signBox && signRef.current ? signRef.current.getBoundingClientRect() : null
       let doc = null
       for (let i = 0; i < pages.length; i++) {
         const p = pages[i]
@@ -211,35 +204,31 @@ export default function App() {
         const pageRect = el.getBoundingClientRect()
         const renderScale = p.canvas.width / pageRect.width // px per display-px
 
-        // composite page + signature at render resolution
         const comp = document.createElement('canvas')
         comp.width = p.canvas.width
         comp.height = p.canvas.height
         const cx = comp.getContext('2d')
         cx.drawImage(p.canvas, 0, 0)
 
-        if (signImg && signRect) {
-          // overlap test between signature box and this page (viewport coords)
-          const ovTop = Math.max(signRect.top, pageRect.top)
-          const ovBot = Math.min(signRect.bottom, pageRect.bottom)
-          if (ovBot > ovTop) {
-            const localX = (signRect.left - pageRect.left) * renderScale
-            const localY = (signRect.top - pageRect.top) * renderScale
-            const localW = signRect.width * renderScale
-            const localH = signRect.height * renderScale
-            cx.drawImage(signImg, localX, localY, localW, localH)
-          }
+        // draw every stamp that overlaps this page
+        for (const s of stamps) {
+          const sEl = stampRefs.current[s.id]
+          if (!sEl) continue
+          const r = sEl.getBoundingClientRect()
+          const ovTop = Math.max(r.top, pageRect.top)
+          const ovBot = Math.min(r.bottom, pageRect.bottom)
+          if (ovBot <= ovTop) continue
+          const localX = (r.left - pageRect.left) * renderScale
+          const localY = (r.top - pageRect.top) * renderScale
+          cx.drawImage(s.img, localX, localY, r.width * renderScale, r.height * renderScale)
         }
 
         const scanned = applyScan(comp)
         const jpeg = scanned.toDataURL('image/jpeg', 0.85)
 
         const orient = p.ptW > p.ptH ? 'l' : 'p'
-        if (i === 0) {
-          doc = new jsPDF({ orientation: orient, unit: 'pt', format: [p.ptW, p.ptH] })
-        } else {
-          doc.addPage([p.ptW, p.ptH], orient)
-        }
+        if (i === 0) doc = new jsPDF({ orientation: orient, unit: 'pt', format: [p.ptW, p.ptH] })
+        else doc.addPage([p.ptW, p.ptH], orient)
         doc.addImage(jpeg, 'JPEG', 0, 0, p.ptW, p.ptH)
       }
       doc.save('signed-scanned.pdf')
@@ -258,17 +247,19 @@ export default function App() {
       e.preventDefault()
       const f = [...(e.dataTransfer?.files || [])]
       const pdf = f.find((x) => x.type === 'application/pdf' || x.name.toLowerCase().endsWith('.pdf'))
-      const png = f.find((x) => x.type.startsWith('image/'))
+      const imgs = f.filter((x) => x.type.startsWith('image/'))
       if (pdf) loadPdf(pdf)
-      if (png) loadSign(png)
+      if (imgs.length) addSigns(imgs)
     }
     const onDragOver = (e) => e.preventDefault()
     const onPaste = (e) => {
       const items = [...(e.clipboardData?.items || [])]
+      const imgs = []
       for (const it of items) {
         if (it.type === 'application/pdf') loadPdf(it.getAsFile())
-        else if (it.type.startsWith('image/')) loadSign(it.getAsFile())
+        else if (it.type.startsWith('image/')) imgs.push(it.getAsFile())
       }
+      if (imgs.length) addSigns(imgs)
     }
     window.addEventListener('drop', onDrop)
     window.addEventListener('dragover', onDragOver)
@@ -278,29 +269,30 @@ export default function App() {
       window.removeEventListener('dragover', onDragOver)
       window.removeEventListener('paste', onPaste)
     }
-  }, [loadPdf, loadSign])
+  }, [loadPdf, addSigns])
 
   return (
     <div className="app">
       <header>
         <h1>Sign &amp; Scan</h1>
-        <p className="sub">Affix a transparent signature on a PDF, download it looking like a clean scan. 100% in your browser — nothing is uploaded.</p>
+        <p className="sub">Affix one or more transparent signatures / stamps on a PDF, download it looking like a clean scan. 100% in your browser — nothing is uploaded.</p>
       </header>
 
       <div className="toolbar">
         <label className="btn">
           Open PDF
           <input type="file" accept="application/pdf" hidden
+            onClick={(e) => { e.target.value = null }}
             onChange={(e) => loadPdf(e.target.files[0])} />
         </label>
         <label className="btn">
-          {signImg ? 'Change signature' : 'Upload signature PNG'}
-          <input type="file" accept="image/png,image/*" hidden
+          Add signature PNG{stamps.length ? ` (${stamps.length})` : ''}
+          <input type="file" accept="image/png,image/*" multiple hidden
             onClick={(e) => { e.target.value = null }}
-            onChange={(e) => loadSign(e.target.files[0])} />
+            onChange={(e) => addSigns(e.target.files)} />
         </label>
-        {signImg && (
-          <button className="btn" onClick={removeSign}>Remove signature</button>
+        {stamps.length > 0 && (
+          <button className="btn" onClick={() => { setStamps([]); setSelId(null) }}>Clear all</button>
         )}
         <div className="slider">
           <span>Scan look</span>
@@ -319,7 +311,7 @@ export default function App() {
 
       <div className="status">{loading ? 'Loading… ' : ''}{status}
         {' '}
-        {!pages.length && !loading && <span className="hint">Tip: you can also drag-drop or paste a PDF / PNG anywhere.</span>}
+        {!pages.length && !loading && <span className="hint">Tip: drag-drop or paste a PDF and PNGs anywhere. Add as many signatures as you like.</span>}
       </div>
 
       <div className="viewer">
@@ -330,22 +322,29 @@ export default function App() {
             </div>
           ))}
 
-          {signImg && signBox && (
+          {stamps.map((s) => (
             <div
-              className="signbox"
-              ref={signRef}
-              style={{ left: signBox.x, top: signBox.y, width: signBox.w, height: signBox.h }}
-              onPointerDown={(e) => onSignPointerDown(e, 'move')}
+              key={s.id}
+              className={'signbox' + (s.id === selId ? ' sel' : '')}
+              ref={(el) => { if (el) stampRefs.current[s.id] = el; else delete stampRefs.current[s.id] }}
+              style={{ left: s.x, top: s.y, width: s.w, height: s.h }}
+              onPointerDown={(e) => onDown(e, s.id, 'move')}
             >
-              <img src={signImg.src} alt="signature" draggable={false} />
-              <div className="handle" onPointerDown={(e) => onSignPointerDown(e, 'resize')} />
+              <img src={s.img.src} alt="signature" draggable={false} />
+              <div className="handle" onPointerDown={(e) => onDown(e, s.id, 'resize')} />
+              <button
+                className="del"
+                title="Remove this signature"
+                onPointerDown={(e) => e.stopPropagation()}
+                onClick={(e) => { e.stopPropagation(); delStamp(s.id) }}
+              >×</button>
             </div>
-          )}
+          ))}
         </div>
       </div>
 
       <footer>
-        <span>One signature per document · drag to move · corner handle to resize · whole page flattened to image on export (text/images not selectable).</span>
+        <span>Add multiple signatures · click one to select · drag to move · corner handle to resize · × to remove · whole page flattened to image on export (text/images not selectable).</span>
       </footer>
     </div>
   )
