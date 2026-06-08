@@ -92,7 +92,7 @@ export default function App() {
         const id = ++idRef.current
         setStamps((prev) => {
           const k = prev.length
-          return [...prev, { id, img, x: x0 + k * 26, y: 40 + k * 26, w, h }]
+          return [...prev, { id, img, x: x0 + k * 26, y: 40 + k * 26, w, h, allPages: false }]
         })
         setSelId(id)
       }
@@ -103,6 +103,10 @@ export default function App() {
   const delStamp = useCallback((id) => {
     setStamps((prev) => prev.filter((s) => s.id !== id))
     setSelId((cur) => (cur === id ? null : cur))
+  }, [])
+
+  const toggleAll = useCallback((id) => {
+    setStamps((prev) => prev.map((s) => (s.id === id ? { ...s, allPages: !s.allPages } : s)))
   }, [])
 
   // ---------- drag / resize a specific stamp ----------
@@ -197,6 +201,31 @@ export default function App() {
     setExporting(true)
     setStatus('Flattening & exporting…')
     try {
+      const SCALE = TARGET_DPI / PT_PER_INCH
+      const pageEls = pageRefs.current.map((el) => el.getBoundingClientRect())
+      // resolve how each stamp prints: single-page (live rect) or all-pages (page-relative)
+      const plans = stamps.map((s) => {
+        const el = stampRefs.current[s.id]
+        if (!el) return null
+        const r = el.getBoundingClientRect()
+        if (!s.allPages) return { img: s.img, all: false, r }
+        // anchor = page with largest vertical overlap (or nearest if outside all)
+        let bi = 0, best = -Infinity
+        pageEls.forEach((pr, idx) => {
+          const ov = Math.min(r.bottom, pr.bottom) - Math.max(r.top, pr.top)
+          const score = ov > 0 ? ov : -Math.min(Math.abs(r.top - pr.bottom), Math.abs(pr.top - r.bottom))
+          if (score > best) { best = score; bi = idx }
+        })
+        const ar = pageEls[bi], ap = pages[bi]
+        return {
+          img: s.img, all: true,
+          fracX: (r.left - ar.left) / ar.width,
+          fracY: (r.top - ar.top) / ar.height,
+          wPx: (r.width / ar.width) * ap.ptW * SCALE,   // physical size, constant on every page
+          hPx: (r.height / ar.height) * ap.ptH * SCALE,
+        }
+      }).filter(Boolean)
+
       let doc = null
       for (let i = 0; i < pages.length; i++) {
         const p = pages[i]
@@ -210,17 +239,18 @@ export default function App() {
         const cx = comp.getContext('2d')
         cx.drawImage(p.canvas, 0, 0)
 
-        // draw every stamp that overlaps this page
-        for (const s of stamps) {
-          const sEl = stampRefs.current[s.id]
-          if (!sEl) continue
-          const r = sEl.getBoundingClientRect()
-          const ovTop = Math.max(r.top, pageRect.top)
-          const ovBot = Math.min(r.bottom, pageRect.bottom)
-          if (ovBot <= ovTop) continue
-          const localX = (r.left - pageRect.left) * renderScale
-          const localY = (r.top - pageRect.top) * renderScale
-          cx.drawImage(s.img, localX, localY, r.width * renderScale, r.height * renderScale)
+        // draw stamps onto this page
+        for (const pl of plans) {
+          if (pl.all) {
+            cx.drawImage(pl.img, pl.fracX * comp.width, pl.fracY * comp.height, pl.wPx, pl.hPx)
+          } else {
+            const r = pl.r
+            const ovTop = Math.max(r.top, pageRect.top)
+            const ovBot = Math.min(r.bottom, pageRect.bottom)
+            if (ovBot <= ovTop) continue
+            cx.drawImage(pl.img, (r.left - pageRect.left) * renderScale, (r.top - pageRect.top) * renderScale,
+              r.width * renderScale, r.height * renderScale)
+          }
         }
 
         const scanned = applyScan(comp)
@@ -325,7 +355,7 @@ export default function App() {
           {stamps.map((s) => (
             <div
               key={s.id}
-              className={'signbox' + (s.id === selId ? ' sel' : '')}
+              className={'signbox' + (s.id === selId ? ' sel' : '') + (s.allPages ? ' allon' : '')}
               ref={(el) => { if (el) stampRefs.current[s.id] = el; else delete stampRefs.current[s.id] }}
               style={{ left: s.x, top: s.y, width: s.w, height: s.h }}
               onPointerDown={(e) => onDown(e, s.id, 'move')}
@@ -338,6 +368,12 @@ export default function App() {
                 onPointerDown={(e) => e.stopPropagation()}
                 onClick={(e) => { e.stopPropagation(); delStamp(s.id) }}
               >×</button>
+              <button
+                className={'allpg' + (s.allPages ? ' on' : '')}
+                title="Place this signature on every page (same size & position)"
+                onPointerDown={(e) => e.stopPropagation()}
+                onClick={(e) => { e.stopPropagation(); toggleAll(s.id) }}
+              >{s.allPages ? '✓ All pages' : 'All pages'}</button>
             </div>
           ))}
         </div>

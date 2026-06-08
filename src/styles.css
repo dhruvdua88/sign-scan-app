@@ -59,6 +59,16 @@ header .sub { margin: 4px 0 0; color: var(--muted); font-size: 12.5px; }
   font-size: 13px; opacity: 0; transition: opacity .12s;
 }
 .signbox:hover .del, .signbox.sel .del { opacity: 1; }
+
+.signbox.allon { outline-color: #f0a020; outline-style: solid; }
+.signbox .allpg {
+  position: absolute; bottom: -24px; left: 50%; transform: translateX(-50%);
+  white-space: nowrap; padding: 2px 8px; border-radius: 10px; cursor: pointer;
+  font-size: 10.5px; line-height: 1.4; border: 1px solid var(--line);
+  background: #222733; color: var(--muted); opacity: 0; transition: opacity .12s;
+}
+.signbox:hover .allpg, .signbox.sel .allpg { opacity: 1; }
+.signbox .allpg.on { background: #f0a020; color: #1a1300; border-color: #f0a020; opacity: 1; font-weight: 600; }
 .signbox .handle {
   position: absolute; right: -7px; bottom: -7px; width: 14px; height: 14px;
   background: var(--accent2); border: 2px solid #0b0d11; border-radius: 50%;
