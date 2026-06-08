@@ -81,19 +81,27 @@ export default function App() {
     const img = new Image()
     img.onload = () => {
       setSignImg(img)
-      // default place: top-left of doc, ~28% of first page width
-      const stack = stackRef.current
-      const firstPage = pageRefs.current[0]
-      const baseW = firstPage ? firstPage.getBoundingClientRect().width : 300
-      const w = baseW * 0.28
-      const h = w * (img.height / img.width)
-      const sRect = stack?.getBoundingClientRect()
-      const pRect = firstPage?.getBoundingClientRect()
-      const x = pRect && sRect ? pRect.left - sRect.left + baseW * 0.1 : 20
-      const y = 40
-      setSignBox({ x, y, w, h })
+      setSignBox((prev) => {
+        // swapping an existing signature: keep position + width, refit height
+        if (prev) return { ...prev, h: prev.w * (img.height / img.width) }
+        // first signature: default place ~28% of first page width, near top-left
+        const stack = stackRef.current
+        const firstPage = pageRefs.current[0]
+        const baseW = firstPage ? firstPage.getBoundingClientRect().width : 300
+        const w = baseW * 0.28
+        const h = w * (img.height / img.width)
+        const sRect = stack?.getBoundingClientRect()
+        const pRect = firstPage?.getBoundingClientRect()
+        const x = pRect && sRect ? pRect.left - sRect.left + baseW * 0.1 : 20
+        return { x, y: 40, w, h }
+      })
     }
     img.src = url
+  }, [])
+
+  const removeSign = useCallback(() => {
+    setSignImg(null)
+    setSignBox(null)
   }, [])
 
   // ---------- drag / resize ----------
@@ -286,10 +294,14 @@ export default function App() {
             onChange={(e) => loadPdf(e.target.files[0])} />
         </label>
         <label className="btn">
-          Upload signature PNG
+          {signImg ? 'Change signature' : 'Upload signature PNG'}
           <input type="file" accept="image/png,image/*" hidden
+            onClick={(e) => { e.target.value = null }}
             onChange={(e) => loadSign(e.target.files[0])} />
         </label>
+        {signImg && (
+          <button className="btn" onClick={removeSign}>Remove signature</button>
+        )}
         <div className="slider">
           <span>Scan look</span>
           <input type="range" min="0" max="100" value={intensity}
