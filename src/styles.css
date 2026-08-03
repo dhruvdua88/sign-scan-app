@@ -42,7 +42,9 @@ header .sub { margin: 4px 0 0; color: var(--muted); font-size: 12.5px; }
 
 .viewer { flex: 1; overflow: auto; padding: 20px; background: #0b0d11; }
 .stack { position: relative; width: max-content; max-width: 100%; margin: 0 auto; }
-.page { margin: 0 auto 18px; box-shadow: 0 6px 24px rgba(0,0,0,.5); background: #fff; }
+.page { margin: 0 auto 18px; }
+/* sized exactly to the page canvas, so stamps can be positioned in page fractions */
+.pagebox { position: relative; width: max-content; margin: 0 auto; box-shadow: 0 6px 24px rgba(0,0,0,.5); background: #fff; }
 .page canvas { display: block; width: min(820px, 92vw); height: auto; }
 
 .signbox {
@@ -51,7 +53,7 @@ header .sub { margin: 4px 0 0; color: var(--muted); font-size: 12.5px; }
 }
 .signbox:active { cursor: grabbing; }
 .signbox.sel { outline-color: var(--accent); outline-style: solid; }
-.signbox img { width: 100%; height: 100%; display: block; pointer-events: none; }
+.signbox img { width: 100%; height: auto; display: block; pointer-events: none; }
 .signbox .del {
   position: absolute; top: -10px; left: -10px; width: 18px; height: 18px;
   line-height: 14px; text-align: center; padding: 0; border-radius: 50%;
@@ -60,7 +62,6 @@ header .sub { margin: 4px 0 0; color: var(--muted); font-size: 12.5px; }
 }
 .signbox:hover .del, .signbox.sel .del { opacity: 1; }
 
-.signbox.allon { outline-color: #f0a020; outline-style: solid; }
 .signbox .allpg {
   position: absolute; bottom: -24px; left: 50%; transform: translateX(-50%);
   white-space: nowrap; padding: 2px 8px; border-radius: 10px; cursor: pointer;
@@ -68,7 +69,7 @@ header .sub { margin: 4px 0 0; color: var(--muted); font-size: 12.5px; }
   background: #222733; color: var(--muted); opacity: 0; transition: opacity .12s;
 }
 .signbox:hover .allpg, .signbox.sel .allpg { opacity: 1; }
-.signbox .allpg.on { background: #f0a020; color: #1a1300; border-color: #f0a020; opacity: 1; font-weight: 600; }
+.signbox .allpg:hover { background: #f0a020; color: #1a1300; border-color: #f0a020; }
 .signbox .handle {
   position: absolute; right: -7px; bottom: -7px; width: 14px; height: 14px;
   background: var(--accent2); border: 2px solid #0b0d11; border-radius: 50%;

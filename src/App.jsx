@@ -8,22 +8,75 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorker
 // render PDF pages at ~200 dpi (good-scanner resolution)
 const TARGET_DPI = 200
 const PT_PER_INCH = 72
+const DEFAULT_W = 0.28          // new stamp width, as a fraction of its page's width
+
+const clamp = (v, lo, hi) => (v < lo ? lo : v > hi ? hi : v)
 
 export default function App() {
   const [pages, setPages] = useState([])      // [{canvas, ptW, ptH}]
   const [loading, setLoading] = useState(false)
   const [status, setStatus] = useState('')
-  const [stamps, setStamps] = useState([])    // [{id, img, x, y, w, h}] document px, relative to pages stack
+  // stamps are anchored to a page: fx/fy/fw are fractions of that page's box
+  const [stamps, setStamps] = useState([])    // [{id, img, aspect, page, fx, fy, fw}]
   const [selId, setSelId] = useState(null)
   const [intensity, setIntensity] = useState(35)
   const [skew, setSkew] = useState(true)
   const [exporting, setExporting] = useState(false)
 
-  const stackRef = useRef(null)
-  const pageRefs = useRef([])
-  const stampRefs = useRef({})   // id -> DOM el
+  const pageRefs = useRef([])    // index -> page <canvas> (its rect is the page box)
   const idRef = useRef(0)
   const dragState = useRef(null)
+  const hoverRef = useRef(null)  // last {page, fx, fy} the pointer was over
+  const clipRef = useRef(null)   // Ctrl+C'd stamp
+
+  // ---------- page geometry helpers ----------
+  const pageRect = (i) => pageRefs.current[i]?.getBoundingClientRect() || null
+
+  // page under a viewport point; falls back to the vertically nearest page
+  const pointToPage = (clientX, clientY) => {
+    let best = null, bestScore = -Infinity
+    pageRefs.current.forEach((el, i) => {
+      if (!el) return
+      const r = el.getBoundingClientRect()
+      const inside = clientY >= r.top && clientY <= r.bottom
+      const score = inside ? 0 : -Math.min(Math.abs(clientY - r.top), Math.abs(clientY - r.bottom))
+      if (score > bestScore) {
+        bestScore = score
+        best = { page: i, fx: (clientX - r.left) / r.width, fy: (clientY - r.top) / r.height }
+      }
+    })
+    return best
+  }
+
+  // where a new stamp should land: the pointer if it is over a page that's on screen,
+  // otherwise the middle of whichever page currently fills most of the viewport
+  const dropPoint = () => {
+    const h = hoverRef.current
+    if (h) {
+      const r = pageRect(h.page)
+      if (r && r.bottom > 0 && r.top < window.innerHeight) return h
+    }
+    let best = 0, bestOv = -Infinity
+    pageRefs.current.forEach((el, i) => {
+      if (!el) return
+      const r = el.getBoundingClientRect()
+      const ov = Math.min(r.bottom, window.innerHeight) - Math.max(r.top, 0)
+      if (ov > bestOv) { bestOv = ov; best = i }
+    })
+    return { page: best, fx: 0.5, fy: 0.5 }
+  }
+
+  // centre a box of the given aspect on `at`, kept inside the page
+  const boxAt = (at, aspect, fw = DEFAULT_W) => {
+    const r = pageRect(at.page)
+    if (!r) return null
+    const fh = (fw * r.width / aspect) / r.height
+    return {
+      page: at.page, fw,
+      fx: clamp(at.fx - fw / 2, 0, Math.max(0, 1 - fw)),
+      fy: clamp(at.fy - fh / 2, 0, Math.max(0, 1 - fh)),
+    }
+  }
 
   // ---------- load PDF ----------
   const loadPdf = useCallback(async (file) => {
@@ -53,6 +106,8 @@ export default function App() {
         out.push({ canvas, ptW: vp1.width, ptH: vp1.height })
       }
       pageRefs.current = []
+      hoverRef.current = null
+      setStamps((prev) => prev.filter((s) => s.page < out.length))
       setPages(out)
       setStatus(`Loaded ${out.length} page${out.length > 1 ? 's' : ''}.`)
     } catch (e) {
@@ -74,29 +129,27 @@ export default function App() {
     })
   }, [pages])
 
-  // ---------- add one or more signature PNGs (each becomes its own stamp) ----------
-  const addSigns = useCallback((files) => {
+  // ---------- add signature PNGs at a point (each file becomes its own stamp) ----------
+  const addSigns = useCallback((files, at) => {
     const list = [...files].filter((f) => f.type.startsWith('image/'))
-    list.forEach((file) => {
-      const url = URL.createObjectURL(file)
+    if (!list.length) return
+    if (!pageRefs.current.length) {
+      setStatus('Open a PDF first, then add signatures.')
+      return
+    }
+    const target = at || dropPoint()
+    list.forEach((file, k) => {
       const img = new Image()
       img.onload = () => {
-        const firstPage = pageRefs.current[0]
-        const stack = stackRef.current
-        const baseW = firstPage ? firstPage.getBoundingClientRect().width : 300
-        const w = baseW * 0.28
-        const h = w * (img.height / img.width)
-        const sRect = stack?.getBoundingClientRect()
-        const pRect = firstPage?.getBoundingClientRect()
-        const x0 = pRect && sRect ? pRect.left - sRect.left + baseW * 0.1 : 20
+        const aspect = img.width / img.height
+        // nudge each extra file so a multi-drop doesn't land in one pile
+        const box = boxAt({ ...target, fx: target.fx + k * 0.03, fy: target.fy + k * 0.03 }, aspect)
+        if (!box) return
         const id = ++idRef.current
-        setStamps((prev) => {
-          const k = prev.length
-          return [...prev, { id, img, x: x0 + k * 26, y: 40 + k * 26, w, h, allPages: false }]
-        })
+        setStamps((prev) => [...prev, { id, img, aspect, ...box }])
         setSelId(id)
       }
-      img.src = url
+      img.src = URL.createObjectURL(file)
     })
   }, [])
 
@@ -105,21 +158,29 @@ export default function App() {
     setSelId((cur) => (cur === id ? null : cur))
   }, [])
 
-  const toggleAll = useCallback((id) => {
-    setStamps((prev) => prev.map((s) => (s.id === id ? { ...s, allPages: !s.allPages } : s)))
+  // put a copy of this stamp on every other page, at the same relative spot.
+  // each copy is an ordinary stamp, so it can be dragged/resized per page afterwards.
+  const copyToAllPages = useCallback((id) => {
+    setStamps((prev) => {
+      const src = prev.find((s) => s.id === id)
+      if (!src) return prev
+      const copies = []
+      for (let i = 0; i < pageRefs.current.length; i++) {
+        if (i === src.page) continue
+        copies.push({ ...src, id: ++idRef.current, page: i })
+      }
+      return [...prev, ...copies]
+    })
   }, [])
 
-  // ---------- drag / resize a specific stamp ----------
-  const onDown = (e, id, mode) => {
+  // ---------- drag / resize ----------
+  const onDown = (e, s, mode) => {
     e.preventDefault()
     e.stopPropagation()
-    setSelId(id)
-    const s = stamps.find((x) => x.id === id)
-    if (!s) return
+    setSelId(s.id)
     dragState.current = {
-      id, mode,
+      id: s.id, mode, page: s.page, box: { fx: s.fx, fy: s.fy, fw: s.fw }, aspect: s.aspect,
       startX: e.clientX, startY: e.clientY,
-      box: { ...s }, aspect: s.w / s.h,
     }
     window.addEventListener('pointermove', onMove)
     window.addEventListener('pointerup', onUp)
@@ -128,14 +189,27 @@ export default function App() {
   const onMove = (e) => {
     const d = dragState.current
     if (!d) return
-    const dx = e.clientX - d.startX
-    const dy = e.clientY - d.startY
-    setStamps((prev) => prev.map((s) => {
-      if (s.id !== d.id) return s
-      if (d.mode === 'move') return { ...s, x: d.box.x + dx, y: d.box.y + dy }
-      const w = Math.max(24, d.box.w + dx)
-      return { ...s, w, h: w / d.aspect }
-    }))
+    const r = pageRect(d.page)
+    if (!r) return
+
+    if (d.mode === 'resize') {
+      const fw = clamp((d.box.fw * r.width + (e.clientX - d.startX)) / r.width, 0.02, 3)
+      setStamps((prev) => prev.map((s) => (s.id === d.id ? { ...s, fw } : s)))
+      return
+    }
+
+    // move in viewport px from the original anchor, then re-anchor to the page under the box centre
+    const w = d.box.fw * r.width
+    const h = w / d.aspect
+    const left = r.left + d.box.fx * r.width + (e.clientX - d.startX)
+    const top = r.top + d.box.fy * r.height + (e.clientY - d.startY)
+    const hit = pointToPage(left + w / 2, top + h / 2)
+    const tp = hit ? hit.page : d.page
+    const tr = pageRect(tp)
+    if (!tr) return
+    setStamps((prev) => prev.map((s) => (s.id === d.id
+      ? { ...s, page: tp, fx: (left - tr.left) / tr.width, fy: (top - tr.top) / tr.height, fw: w / tr.width }
+      : s)))
   }
 
   const onUp = () => {
@@ -201,56 +275,20 @@ export default function App() {
     setExporting(true)
     setStatus('Flattening & exporting…')
     try {
-      const SCALE = TARGET_DPI / PT_PER_INCH
-      const pageEls = pageRefs.current.map((el) => el.getBoundingClientRect())
-      // resolve how each stamp prints: single-page (live rect) or all-pages (page-relative)
-      const plans = stamps.map((s) => {
-        const el = stampRefs.current[s.id]
-        if (!el) return null
-        const r = el.getBoundingClientRect()
-        if (!s.allPages) return { img: s.img, all: false, r }
-        // anchor = page with largest vertical overlap (or nearest if outside all)
-        let bi = 0, best = -Infinity
-        pageEls.forEach((pr, idx) => {
-          const ov = Math.min(r.bottom, pr.bottom) - Math.max(r.top, pr.top)
-          const score = ov > 0 ? ov : -Math.min(Math.abs(r.top - pr.bottom), Math.abs(pr.top - r.bottom))
-          if (score > best) { best = score; bi = idx }
-        })
-        const ar = pageEls[bi], ap = pages[bi]
-        return {
-          img: s.img, all: true,
-          fracX: (r.left - ar.left) / ar.width,
-          fracY: (r.top - ar.top) / ar.height,
-          wPx: (r.width / ar.width) * ap.ptW * SCALE,   // physical size, constant on every page
-          hPx: (r.height / ar.height) * ap.ptH * SCALE,
-        }
-      }).filter(Boolean)
-
       let doc = null
       for (let i = 0; i < pages.length; i++) {
         const p = pages[i]
-        const el = pageRefs.current[i]
-        const pageRect = el.getBoundingClientRect()
-        const renderScale = p.canvas.width / pageRect.width // px per display-px
-
         const comp = document.createElement('canvas')
         comp.width = p.canvas.width
         comp.height = p.canvas.height
         const cx = comp.getContext('2d')
         cx.drawImage(p.canvas, 0, 0)
 
-        // draw stamps onto this page
-        for (const pl of plans) {
-          if (pl.all) {
-            cx.drawImage(pl.img, pl.fracX * comp.width, pl.fracY * comp.height, pl.wPx, pl.hPx)
-          } else {
-            const r = pl.r
-            const ovTop = Math.max(r.top, pageRect.top)
-            const ovBot = Math.min(r.bottom, pageRect.bottom)
-            if (ovBot <= ovTop) continue
-            cx.drawImage(pl.img, (r.left - pageRect.left) * renderScale, (r.top - pageRect.top) * renderScale,
-              r.width * renderScale, r.height * renderScale)
-          }
+        // stamps carry page-relative fractions, so this is the same geometry the user sees
+        for (const s of stamps) {
+          if (s.page !== i) continue
+          const w = s.fw * comp.width
+          cx.drawImage(s.img, s.fx * comp.width, s.fy * comp.height, w, w / s.aspect)
         }
 
         const scanned = applyScan(comp)
@@ -271,7 +309,7 @@ export default function App() {
     }
   }
 
-  // ---------- global drag-drop + paste ----------
+  // ---------- global drag-drop, copy / paste ----------
   useEffect(() => {
     const onDrop = (e) => {
       e.preventDefault()
@@ -279,9 +317,18 @@ export default function App() {
       const pdf = f.find((x) => x.type === 'application/pdf' || x.name.toLowerCase().endsWith('.pdf'))
       const imgs = f.filter((x) => x.type.startsWith('image/'))
       if (pdf) loadPdf(pdf)
-      if (imgs.length) addSigns(imgs)
+      if (imgs.length) addSigns(imgs, pointToPage(e.clientX, e.clientY))
     }
     const onDragOver = (e) => e.preventDefault()
+
+    const onCopy = (e) => {
+      if (e.target.closest?.('input, textarea')) return
+      const s = stamps.find((x) => x.id === selId)
+      if (!s) return
+      clipRef.current = s
+      setStatus('Signature copied — Ctrl+V pastes it where the pointer is.')
+    }
+
     const onPaste = (e) => {
       const items = [...(e.clipboardData?.items || [])]
       const imgs = []
@@ -289,17 +336,28 @@ export default function App() {
         if (it.type === 'application/pdf') loadPdf(it.getAsFile())
         else if (it.type.startsWith('image/')) imgs.push(it.getAsFile())
       }
-      if (imgs.length) addSigns(imgs)
+      if (imgs.length) { addSigns(imgs, dropPoint()); return }
+      // nothing pasteable in the OS clipboard — fall back to our own Ctrl+C'd stamp
+      const src = clipRef.current
+      if (!src || !pageRefs.current.length) return
+      const box = boxAt(dropPoint(), src.aspect, src.fw)
+      if (!box) return
+      const id = ++idRef.current
+      setStamps((prev) => [...prev, { id, img: src.img, aspect: src.aspect, ...box }])
+      setSelId(id)
     }
+
     window.addEventListener('drop', onDrop)
     window.addEventListener('dragover', onDragOver)
+    window.addEventListener('copy', onCopy)
     window.addEventListener('paste', onPaste)
     return () => {
       window.removeEventListener('drop', onDrop)
       window.removeEventListener('dragover', onDragOver)
+      window.removeEventListener('copy', onCopy)
       window.removeEventListener('paste', onPaste)
     }
-  }, [loadPdf, addSigns])
+  }, [loadPdf, addSigns, stamps, selId])
 
   return (
     <div className="app">
@@ -345,42 +403,45 @@ export default function App() {
       </div>
 
       <div className="viewer">
-        <div className="stack" ref={stackRef}>
+        <div
+          className="stack"
+          onPointerMove={(e) => { hoverRef.current = pointToPage(e.clientX, e.clientY) }}
+        >
           {pages.map((p, i) => (
             <div className="page" key={i}>
-              <canvas ref={(el) => (pageRefs.current[i] = el)} />
-            </div>
-          ))}
-
-          {stamps.map((s) => (
-            <div
-              key={s.id}
-              className={'signbox' + (s.id === selId ? ' sel' : '') + (s.allPages ? ' allon' : '')}
-              ref={(el) => { if (el) stampRefs.current[s.id] = el; else delete stampRefs.current[s.id] }}
-              style={{ left: s.x, top: s.y, width: s.w, height: s.h }}
-              onPointerDown={(e) => onDown(e, s.id, 'move')}
-            >
-              <img src={s.img.src} alt="signature" draggable={false} />
-              <div className="handle" onPointerDown={(e) => onDown(e, s.id, 'resize')} />
-              <button
-                className="del"
-                title="Remove this signature"
-                onPointerDown={(e) => e.stopPropagation()}
-                onClick={(e) => { e.stopPropagation(); delStamp(s.id) }}
-              >×</button>
-              <button
-                className={'allpg' + (s.allPages ? ' on' : '')}
-                title="Place this signature on every page (same size & position)"
-                onPointerDown={(e) => e.stopPropagation()}
-                onClick={(e) => { e.stopPropagation(); toggleAll(s.id) }}
-              >{s.allPages ? '✓ All pages' : 'All pages'}</button>
+              <div className="pagebox">
+                <canvas ref={(el) => (pageRefs.current[i] = el)} />
+                {stamps.filter((s) => s.page === i).map((s) => (
+                  <div
+                    key={s.id}
+                    className={'signbox' + (s.id === selId ? ' sel' : '')}
+                    style={{ left: `${s.fx * 100}%`, top: `${s.fy * 100}%`, width: `${s.fw * 100}%` }}
+                    onPointerDown={(e) => onDown(e, s, 'move')}
+                  >
+                    <img src={s.img.src} alt="signature" draggable={false} />
+                    <div className="handle" onPointerDown={(e) => onDown(e, s, 'resize')} />
+                    <button
+                      className="del"
+                      title="Remove this signature"
+                      onPointerDown={(e) => e.stopPropagation()}
+                      onClick={(e) => { e.stopPropagation(); delStamp(s.id) }}
+                    >×</button>
+                    <button
+                      className="allpg"
+                      title="Put a copy on every page — each copy can then be moved separately"
+                      onPointerDown={(e) => e.stopPropagation()}
+                      onClick={(e) => { e.stopPropagation(); copyToAllPages(s.id) }}
+                    >Copy to all pages</button>
+                  </div>
+                ))}
+              </div>
             </div>
           ))}
         </div>
       </div>
 
       <footer>
-        <span>Add multiple signatures · click one to select · drag to move · corner handle to resize · × to remove · whole page flattened to image on export (text/images not selectable).</span>
+        <span>Drop / paste a signature where you want it · drag to move (across pages too) · corner handle to resize · Ctrl+C then Ctrl+V to copy one under the pointer · “Copy to all pages” drops an independent copy on every page · × removes.</span>
       </footer>
     </div>
   )
